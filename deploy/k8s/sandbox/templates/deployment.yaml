@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-api
+spec:
+  selector:
+    matchLabels:
+      app: sandbox-api
+  template:
+    metadata:
+      labels:
+        app: sandbox-api
+    spec:
+      serviceAccountName: sandbox-api
+      containers:
+        - name: api
+          image: ghcr.io/kzh/sandbox-api:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3001
+          env:
+            - name: SANDBOX_API_ENVIRONMENT
+              value: "prod"
+            - name: SANDBOX_API_DBURL
+              value: "postgres://postgresql:5432/sandbox?sslmode=disable"
+            - name: SANDBOX_API_DBUSERNAME
+              value: "postgres"
+            - name: SANDBOX_API_DBPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql
+                  key: postgres-password
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-web
+spec:
+  selector:
+    matchLabels:
+      app: sandbox-web
+  template:
+    metadata:
+      labels:
+        app: sandbox-web
+    spec:
+      containers:
+        - name: web
+          image: ghcr.io/kzh/sandbox-web:latest
+          ports:
+            - containerPort: 3000

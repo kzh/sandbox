@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-api
+  labels:
+    app: sandbox-api
+spec:
+  selector:
+    app: sandbox-api
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 3001
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-web
+  labels:
+    app: sandbox-web
+spec:
+  selector:
+    app: sandbox-web
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 3000
+  type: ClusterIP

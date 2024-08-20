@@ -1,0 +1,21 @@
+[http.services]
+
+[http.services.web.loadBalancer]
+[[http.services.web.loadBalancer.servers]]
+url = "http://localhost:3000/"
+
+[http.services.api.loadBalancer]
+[[http.services.api.loadBalancer.servers]]
+url = "http://localhost:3001/"
+
+[http.routers]
+
+[http.routers.api]
+rule = "PathPrefix(`/api`)"
+service = "api"
+priority = 2
+
+[http.routers.web]
+rule = "PathPrefix(`/`)"
+service = "web"
+priority = 1

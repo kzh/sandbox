@@ -1,0 +1,29 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sandbox
+  namespace: sandbox
+spec:
+  ingressClassName: {{ quote .Values.ingress.className }}
+  tls:
+    - hosts:
+        - {{ quote .Values.ingress.hostname }}
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: sandbox-web
+                port:
+                  number: 80
+          - path: /api/
+            pathType: Prefix
+            backend:
+              service:
+                name: sandbox-api
+                port:
+                  number: 80
+{{- end }}
