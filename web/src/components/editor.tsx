@@ -1,14 +1,13 @@
 "use client";
 
-import { useRef, useState } from "react";
-import Monaco from "@monaco-editor/react";
-import { editor } from "monaco-editor";
+import { useState } from "react";
+import Monaco, { OnMount as OnEditorMount } from "@monaco-editor/react";
+import { editor as Editor } from "monaco-editor";
 import axios from "axios";
 import { createRoot } from "react-dom/client";
 import { Drum, LoaderCircle } from "lucide-react";
-import IOverlayWidget = editor.IOverlayWidget;
 
-const rosePineDawnTheme: editor.IStandaloneThemeData = {
+const rosePineDawnTheme: Editor.IStandaloneThemeData = {
   base: "vs",
   inherit: false,
   rules: [
@@ -60,24 +59,49 @@ const rosePineDawnTheme: editor.IStandaloneThemeData = {
   },
 };
 
+const options: Editor.IStandaloneEditorConstructionOptions = {
+  minimap: {
+    enabled: false,
+  },
+  renderLineHighlight: "none",
+  theme: "rose-pine-dawn",
+  fontSize: 16,
+  bracketPairColorization: {
+    enabled: false,
+  },
+  padding: {
+    top: 16,
+  },
+  overviewRulerLanes: 0,
+  hideCursorInOverviewRuler: true,
+  overviewRulerBorder: false,
+  scrollBeyondLastLine: false,
+  automaticLayout: true,
+  contextmenu: false,
+};
+
 interface ExecuteProps {
+  editor: Editor.IStandaloneCodeEditor;
+  monaco: typeof import("monaco-editor");
   execute: () => void;
 }
 
-const ExecuteButton = (params: ExecuteProps) => {
-  const [isLoading, setIsLoading] = useState(false);
+const ExecuteButton = ({ editor, monaco, execute }: ExecuteProps) => {
+  const [loading, setLoading] = useState(false);
 
-  const execute = async () => {
-    setIsLoading(true);
-    await params.execute();
-    setIsLoading(false);
+  const click = async () => {
+    if (loading) return;
 
-    console.log("hello");
+    setLoading(true);
+    await execute();
+    setLoading(false);
   };
 
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, click);
+
   return (
-    <button onClick={execute} disabled={isLoading}>
-      {isLoading ? (
+    <button onClick={click} disabled={loading}>
+      {loading ? (
         <LoaderCircle className="size-5 mt-5 animate-spin" />
       ) : (
         <Drum className="size-5 mt-5" />
@@ -86,69 +110,34 @@ const ExecuteButton = (params: ExecuteProps) => {
   );
 };
 
-class ToolboxElement implements IOverlayWidget {
-  private readonly execute: () => void;
+export default function CodeEditor() {
+  const [output, setOutput] = useState("");
 
-  constructor(execute: () => void) {
-    this.execute = execute;
-  }
+  const setupEditor: OnEditorMount = (editor, monaco) => {
+    async function execute() {
+      setOutput("");
+      const code = editor.getValue();
+      const resp = await axios.post("/api/execute", { code });
+      setOutput(resp.data.output);
+    }
 
-  getDomNode(): HTMLElement {
     const div = document.createElement("div");
     const root = createRoot(div);
     root.render(
       <>
-        <ExecuteButton execute={this.execute} />
+        <ExecuteButton editor={editor} monaco={monaco} execute={execute} />
       </>,
     );
-    return div;
-  }
 
-  getId(): string {
-    return "toolbox";
-  }
-
-  getPosition(): editor.IOverlayWidgetPosition | null {
-    return {
-      preference: editor.OverlayWidgetPositionPreference.TOP_RIGHT_CORNER,
+    const widget: Editor.IOverlayWidget = {
+      getPosition: () => ({
+        preference: Editor.OverlayWidgetPositionPreference.TOP_RIGHT_CORNER,
+      }),
+      getDomNode: () => div,
+      getId: () => "toolbox",
     };
-  }
-}
-
-export default function Editor() {
-  let editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
-
-  const options: editor.IStandaloneEditorConstructionOptions = {
-    minimap: {
-      enabled: false,
-    },
-    renderLineHighlight: "none",
-    theme: "rose-pine-dawn",
-    fontSize: 16,
-    bracketPairColorization: {
-      enabled: false,
-    },
-    padding: {
-      top: 16,
-    },
-    overviewRulerLanes: 0,
-    hideCursorInOverviewRuler: true,
-    overviewRulerBorder: false,
-    scrollBeyondLastLine: false,
-    automaticLayout: true,
-    contextmenu: false,
+    editor.addOverlayWidget(widget);
   };
-
-  const code = `package main\n\nimport (\n    "fmt"\n)\n\nfunc main() {\n    fmt.Println("Hello, world!")\n}`;
-
-  const [output, setOutput] = useState("");
-
-  async function execute() {
-    setOutput("");
-    const code = editorRef.current?.getValue();
-    const resp = await axios.post("/api/execute", { code });
-    setOutput(resp.data.output);
-  }
 
   return (
     <div className="w-full h-full">
@@ -157,24 +146,15 @@ export default function Editor() {
           height="60vh"
           options={options}
           loading={null}
-          value={code}
+          value={`package main\n\nimport (\n    "fmt"\n)\n\nfunc main() {\n    fmt.Println("Hello, world!")\n}`}
           language="go"
           theme="rose-pine-dawn"
           beforeMount={(monaco) => {
             monaco.editor.defineTheme("rose-pine-dawn", rosePineDawnTheme);
             monaco.editor.setTheme("rose-pine-dawn");
           }}
-          onMount={(editor, monaco) => {
-            editor.addOverlayWidget(new ToolboxElement(execute));
-            editor.addCommand(
-              monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter,
-              execute,
-            );
-            console.log("hello")
-            editorRef.current = editor;
-          }}
+          onMount={setupEditor}
         />
-        <div className="absolute">hello</div>
       </div>
       <div className="whitespace-pre-line">{output}</div>
     </div>
