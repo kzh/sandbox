@@ -53,7 +53,7 @@ func (g *GolangExecutor) Execute(ctx context.Context, code string) (string, erro
 
 	start := time.Now()
 	if _, err := g.builders.Exec(
-		ctx, builder, []string{"go", "build", "-o", "/app/main", "/app/main.go"}, nil,
+		ctx, builder, []string{"go", "build", "-o", "/app/main", "-ldflags", "-s -w", "/app/main.go"}, nil,
 	); err != nil {
 		return "", errors.Wrap(err, "building code")
 	}
