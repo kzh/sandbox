@@ -4,19 +4,17 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"sync"
-	"time"
-
 	"github.com/cockroachdb/errors"
+	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/informers"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/remotecommand"
+	"sync"
 )
 
 var (
@@ -37,9 +35,12 @@ func (w *Worker) Name() string {
 
 type Workers struct {
 	deployment *appsv1.Deployment
-	pods       sync.Map
-	workers    chan *Worker
-	stop       chan struct{}
+
+	workers map[string]*Worker
+	tickets chan struct{}
+	mu      sync.Mutex
+
+	stopper func()
 
 	name      string
 	namespace string
@@ -63,8 +64,8 @@ func (c *Client) NewWorkers(namespace string, name string, image string, size in
 
 		k8s: c,
 
-		pods:    sync.Map{},
-		workers: make(chan *Worker, size),
+		workers: make(map[string]*Worker),
+		tickets: make(chan struct{}, size*2),
 	}
 }
 
@@ -87,44 +88,50 @@ func (w *Workers) Start(ctx context.Context) error {
 }
 
 func (w *Workers) sync() error {
-	selector := labels.SelectorFromSet(labels.Set{"sandbox/pool": w.name})
-	factory := informers.NewSharedInformerFactoryWithOptions(w.k8s.clientset, time.Second, informers.WithNamespace(w.namespace), informers.WithTweakListOptions(func(options *metav1.ListOptions) {
-		options.LabelSelector = selector.String()
-	}))
-	informer := factory.Core().V1().Pods().Informer()
-
-	_, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			pod := obj.(*corev1.Pod)
-			if IsPodReady(pod) {
-				w.register(pod)
-				w.pods.Store(pod.Name, struct{}{})
-			}
-		},
-		UpdateFunc: func(oldObj, newObj interface{}) {
-			oldPod, pod := oldObj.(*corev1.Pod), newObj.(*corev1.Pod)
-			if IsPodReady(oldPod) || !IsPodReady(pod) {
-				return
-			}
-
-			w.register(pod)
-		},
-		DeleteFunc: func(obj interface{}) {
-			pod := obj.(*corev1.Pod)
-			w.pods.Delete(pod.Name)
-		},
+	ctx := context.Background()
+	selector := labels.SelectorFromSet(labels.Set{
+		"sandbox/pool":    w.name,
+		"sandbox/claimed": "false"},
+	)
+	pods, err := w.k8s.clientset.CoreV1().Pods(w.namespace).Watch(ctx, metav1.ListOptions{
+		LabelSelector: selector.String(),
 	})
 	if err != nil {
-		return err
+		return errors.Wrap(err, "watching deployments")
 	}
+	w.stopper = pods.Stop
 
-	w.stop = make(chan struct{})
-	go factory.Start(w.stop)
+	go func() {
+		for event := range pods.ResultChan() {
+			switch event.Type {
+			case watch.Added:
+				pod := event.Object.(*corev1.Pod)
+				w.mu.Lock()
+				_, ok := w.workers[pod.Name]
+				if !ok {
+					w.workers[pod.Name] = &Worker{pod}
+					w.tickets <- struct{}{}
+				}
+				w.mu.Unlock()
+			case watch.Modified:
+				pod := event.Object.(*corev1.Pod)
+				w.mu.Lock()
+				_, ok := w.workers[pod.Name]
+				if !ok && IsPodReady(pod) {
+					w.workers[pod.Name] = &Worker{pod}
+					w.tickets <- struct{}{}
+
+				} else if ok && !IsPodReady(pod) {
+					delete(w.workers, pod.Name)
+					<-w.tickets
+				}
+				w.mu.Unlock()
+			case watch.Error:
+				zap.S().Warnw("pod watch", "object", event.Object)
+			}
+		}
+	}()
 	return nil
-}
-
-func (w *Workers) register(pod *corev1.Pod) {
-	w.workers <- &Worker{pod: pod}
 }
 
 func (w *Workers) deploy(ctx context.Context) (*appsv1.Deployment, error) {
@@ -196,6 +203,10 @@ func IsPodReady(pod *corev1.Pod) bool {
 		return false
 	}
 
+	if pod.DeletionTimestamp != nil {
+		return false
+	}
+
 	for _, condition := range pod.Status.Conditions {
 		if condition.Status != corev1.ConditionTrue {
 			return false
@@ -212,11 +223,22 @@ func IsPodReady(pod *corev1.Pod) bool {
 }
 
 func (w *Workers) Acquire(ctx context.Context) (*Worker, error) {
-	var worker *Worker
 	select {
-	case worker = <-w.workers:
+	case <-w.tickets:
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+
+	var worker *Worker
+	w.mu.Lock()
+	for _, worker = range w.workers {
+		break
+	}
+	delete(w.workers, worker.pod.Name)
+	w.mu.Unlock()
+
+	if worker == nil {
+		return nil, errors.New("no worker available")
 	}
 
 	worker.pod.Labels["sandbox/claimed"] = "true"
