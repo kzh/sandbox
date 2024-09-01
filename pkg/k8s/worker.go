@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync"
+
 	"github.com/cockroachdb/errors"
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
@@ -14,7 +16,6 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
-	"sync"
 )
 
 var (
@@ -91,8 +92,8 @@ func (w *Workers) sync() error {
 	ctx := context.Background()
 	selector := labels.SelectorFromSet(labels.Set{
 		"sandbox/pool":    w.name,
-		"sandbox/claimed": "false"},
-	)
+		"sandbox/claimed": "false",
+	})
 	pods, err := w.k8s.clientset.CoreV1().Pods(w.namespace).Watch(ctx, metav1.ListOptions{
 		LabelSelector: selector.String(),
 	})
@@ -110,22 +111,26 @@ func (w *Workers) sync() error {
 				_, ok := w.workers[pod.Name]
 				if !ok {
 					w.workers[pod.Name] = &Worker{pod}
+					w.mu.Unlock()
 					w.tickets <- struct{}{}
+				} else {
+					w.mu.Unlock()
 				}
-				w.mu.Unlock()
 			case watch.Modified:
 				pod := event.Object.(*corev1.Pod)
 				w.mu.Lock()
 				_, ok := w.workers[pod.Name]
 				if !ok && IsPodReady(pod) {
 					w.workers[pod.Name] = &Worker{pod}
+					w.mu.Unlock()
 					w.tickets <- struct{}{}
-
 				} else if ok && !IsPodReady(pod) {
 					delete(w.workers, pod.Name)
+					w.mu.Unlock()
 					<-w.tickets
+				} else {
+					w.mu.Unlock()
 				}
-				w.mu.Unlock()
 			case watch.Error:
 				zap.S().Warnw("pod watch", "object", event.Object)
 			}
@@ -234,7 +239,9 @@ func (w *Workers) Acquire(ctx context.Context) (*Worker, error) {
 	for _, worker = range w.workers {
 		break
 	}
-	delete(w.workers, worker.pod.Name)
+	if worker != nil {
+		delete(w.workers, worker.pod.Name)
+	}
 	w.mu.Unlock()
 
 	if worker == nil {
