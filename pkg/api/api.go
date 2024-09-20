@@ -133,7 +133,10 @@ func (s *Server) handleExecute(c *gin.Context) {
 
 	zap.L().Info("received request", zap.String("code", params.Code))
 
-	out, err := s.executor.Execute(context.Background(), params.Code)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
+	defer cancel()
+
+	out, err := s.executor.Execute(ctx, params.Code)
 	if err != nil {
 		zap.L().Error("failed to execute code", zap.Error(err))
 		c.JSON(200, gin.H{
