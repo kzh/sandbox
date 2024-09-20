@@ -70,6 +70,7 @@ func (g *GolangExecutor) Execute(ctx context.Context, code string) (string, erro
 		return "", errors.Wrap(err, "fetching runner")
 	}
 	defer workers.Release(ctx, runner)
+	zap.S().Infow("fetching runner", "pod", runner.Name())
 
 	if err := workers.Write(ctx, runner, "main", prog); err != nil {
 		return "", errors.Wrap(err, "writing executable")

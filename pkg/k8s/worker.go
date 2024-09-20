@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
+	"time"
 
 	"github.com/cockroachdb/errors"
 	"go.uber.org/zap"
@@ -37,9 +40,9 @@ func (w *Worker) Name() string {
 type Workers struct {
 	deployment *appsv1.Deployment
 
-	workers map[string]*Worker
-	tickets chan struct{}
-	mu      sync.Mutex
+	pods map[string]*corev1.Pod
+	sub  map[chan<- *Worker]struct{}
+	mu   sync.Mutex
 
 	stopper func()
 
@@ -65,8 +68,8 @@ func (c *Client) NewWorkers(namespace string, name string, image string, size in
 
 		k8s: c,
 
-		workers: make(map[string]*Worker),
-		tickets: make(chan struct{}, size*2),
+		pods: make(map[string]*corev1.Pod, size*2),
+		sub:  make(map[chan<- *Worker]struct{}),
 	}
 }
 
@@ -76,9 +79,7 @@ func (w *Workers) LimitResource(cpu int, mem int) {
 }
 
 func (w *Workers) Start(ctx context.Context) error {
-	if err := w.sync(); err != nil {
-		return errors.Wrap(err, "sync")
-	}
+	go w.sync()
 
 	deployment, err := w.deploy(ctx)
 	if err != nil {
@@ -88,55 +89,76 @@ func (w *Workers) Start(ctx context.Context) error {
 	return nil
 }
 
-func (w *Workers) sync() error {
-	ctx := context.Background()
-	selector := labels.SelectorFromSet(labels.Set{
-		"sandbox/pool":    w.name,
-		"sandbox/claimed": "false",
-	})
-	pods, err := w.k8s.clientset.CoreV1().Pods(w.namespace).Watch(ctx, metav1.ListOptions{
-		LabelSelector: selector.String(),
-	})
-	if err != nil {
-		return errors.Wrap(err, "watching deployments")
-	}
-	w.stopper = pods.Stop
+func (w *Workers) sync() {
+	for {
+		func() {
+			ctx := context.Background()
+			selector := labels.SelectorFromSet(labels.Set{
+				"sandbox/pool":    w.name,
+				"sandbox/claimed": "false",
+			})
+			pods, err := w.k8s.clientset.CoreV1().Pods(w.namespace).Watch(ctx, metav1.ListOptions{
+				LabelSelector: selector.String(),
+			})
+			if err != nil {
+				zap.S().Warnw("pod watch", "error", err)
+				time.Sleep(time.Second)
+				return
+			}
+			defer pods.Stop()
 
-	go func() {
-		for event := range pods.ResultChan() {
-			switch event.Type {
-			case watch.Added:
-				pod := event.Object.(*corev1.Pod)
-				w.mu.Lock()
-				_, ok := w.workers[pod.Name]
-				if !ok {
-					w.workers[pod.Name] = &Worker{pod}
-					w.mu.Unlock()
-					w.tickets <- struct{}{}
-				} else {
-					w.mu.Unlock()
+			for event := range pods.ResultChan() {
+				switch event.Type {
+				case watch.Added, watch.Modified:
+					pod := event.Object.(*corev1.Pod)
+					w.ingest(pod)
+				case watch.Error:
+					zap.S().Warnw("pod watch", "object", event.Object)
 				}
-			case watch.Modified:
-				pod := event.Object.(*corev1.Pod)
-				w.mu.Lock()
-				_, ok := w.workers[pod.Name]
-				if !ok && IsPodReady(pod) {
-					w.workers[pod.Name] = &Worker{pod}
-					w.mu.Unlock()
-					w.tickets <- struct{}{}
-				} else if ok && !IsPodReady(pod) {
-					delete(w.workers, pod.Name)
-					w.mu.Unlock()
-					<-w.tickets
-				} else {
-					w.mu.Unlock()
-				}
-			case watch.Error:
-				zap.S().Warnw("pod watch", "object", event.Object)
+			}
+		}()
+		zap.S().Warnw("pod watch closed", "group", w.name)
+	}
+}
+
+func (w *Workers) ingest(pod *corev1.Pod) {
+	if IsPodReady(pod) {
+		w.mu.Lock()
+		_, ok := w.pods[pod.Name]
+		if ok {
+			w.mu.Unlock()
+			return
+		}
+		zap.S().Infow("pod added", "group", w.name, "pod", pod.Name)
+
+		var ch chan<- *Worker
+		for ch = range w.sub {
+			delete(w.sub, ch)
+			break
+		}
+
+		if ch == nil {
+			w.pods[pod.Name] = pod
+		} else {
+			select {
+			case ch <- &Worker{pod}:
+			default:
+				zap.S().Error("unable to send worker")
 			}
 		}
-	}()
-	return nil
+		w.mu.Unlock()
+	} else {
+		w.mu.Lock()
+		_, ok := w.pods[pod.Name]
+		if !ok {
+			w.mu.Unlock()
+			return
+		}
+		zap.S().Infow("pod removed", "group", w.name, "pod", pod.Name)
+
+		delete(w.pods, pod.Name)
+		w.mu.Unlock()
+	}
 }
 
 func (w *Workers) deploy(ctx context.Context) (*appsv1.Deployment, error) {
@@ -228,24 +250,32 @@ func IsPodReady(pod *corev1.Pod) bool {
 }
 
 func (w *Workers) Acquire(ctx context.Context) (*Worker, error) {
-	select {
-	case <-w.tickets:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-
 	var worker *Worker
+	var ch chan *Worker
 	w.mu.Lock()
-	for _, worker = range w.workers {
+	zap.S().Infow("acquiring worker", "group", w.name, "workers", slices.Collect(maps.Keys(w.pods)), "waiting", len(w.sub))
+
+	for name, pod := range w.pods {
+		worker = &Worker{pod}
+		delete(w.pods, name)
 		break
 	}
-	if worker != nil {
-		delete(w.workers, worker.pod.Name)
+	if worker == nil {
+		ch = make(chan *Worker, 1)
+		defer close(ch)
+		w.sub[ch] = struct{}{}
 	}
 	w.mu.Unlock()
 
 	if worker == nil {
-		return nil, errors.New("no worker available")
+		select {
+		case <-ctx.Done():
+			w.mu.Lock()
+			delete(w.sub, ch)
+			w.mu.Unlock()
+			return nil, errors.Wrap(ctx.Err(), "no worker available")
+		case worker = <-ch:
+		}
 	}
 
 	worker.pod.Labels["sandbox/claimed"] = "true"
