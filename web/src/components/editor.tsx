@@ -49,7 +49,6 @@ const rosePineDawnTheme: Editor.IStandaloneThemeData = {
     "sideBarTitle.foreground": "#9893a5",
     "sideBarSectionHeader.background": "#f2e9e1",
     "sideBarSectionHeader.foreground": "#575279",
-
     "editorBracketHighlight.foreground1": "#9893a5",
     "editorBracketHighlight.foreground2": "#9893a5",
     "editorBracketHighlight.foreground3": "#9893a5",
@@ -60,18 +59,12 @@ const rosePineDawnTheme: Editor.IStandaloneThemeData = {
 };
 
 const options: Editor.IStandaloneEditorConstructionOptions = {
-  minimap: {
-    enabled: false,
-  },
+  minimap: { enabled: false },
   renderLineHighlight: "none",
   theme: "rose-pine-dawn",
   fontSize: 16,
-  bracketPairColorization: {
-    enabled: false,
-  },
-  padding: {
-    top: 16,
-  },
+  bracketPairColorization: { enabled: false },
+  padding: { top: 16 },
   overviewRulerLanes: 0,
   hideCursorInOverviewRuler: true,
   overviewRulerBorder: false,
@@ -117,16 +110,28 @@ export default function CodeEditor() {
     async function execute() {
       setOutput("");
       const code = editor.getValue();
-      const resp = await axios.post("/api/execute", { code });
-      setOutput(resp.data.output);
+      await axios
+        .post("/api/execute", { code })
+        .then((resp) => {
+          setOutput(resp.data.output);
+        })
+        .catch((error) => {
+          if (error.status == 429) {
+            setOutput(
+              "You are sending too many requests. Please try again later.",
+            );
+          } else {
+            setOutput(
+              "An error occurred while executing the code. Please try again later.",
+            );
+          }
+        });
     }
 
     const div = document.createElement("div");
     const root = createRoot(div);
     root.render(
-      <>
-        <ExecuteButton editor={editor} monaco={monaco} execute={execute} />
-      </>,
+      <ExecuteButton editor={editor} monaco={monaco} execute={execute} />,
     );
 
     const widget: Editor.IOverlayWidget = {
