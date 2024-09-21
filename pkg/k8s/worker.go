@@ -181,6 +181,20 @@ func (w *Workers) deploy(ctx context.Context) (*appsv1.Deployment, error) {
 		resources[corev1.ResourceMemory] = resource.MustParse(fmt.Sprintf("%dMi", w.mem))
 	}
 
+	var unset []corev1.EnvVar
+	for _, env := range []string{
+		"KUBERNETES_SERVICE_HOST",
+		"KUBERNETES_SERVICE_PORT",
+		"KUBERNETES_SERVICE_PORT_HTTPS",
+		"KUBERNETES_PORT",
+		"KUBERNETES_PORT_443_TCP",
+		"KUBERNETES_PORT_443_TCP_ADDR",
+		"KUBERNETES_PORT_443_TCP_PORT",
+		"KUBERNETES_PORT_443_TCP_PROTO",
+	} {
+		unset = append(unset, corev1.EnvVar{Name: env, Value: ""})
+	}
+
 	spec := corev1.PodSpec{
 		Containers: []corev1.Container{
 			{
@@ -190,6 +204,7 @@ func (w *Workers) deploy(ctx context.Context) (*appsv1.Deployment, error) {
 				Resources: corev1.ResourceRequirements{
 					Requests: resources,
 				},
+				Env: unset,
 			},
 		},
 		AutomountServiceAccountToken:  &AutoMountServiceAccount,
@@ -199,6 +214,7 @@ func (w *Workers) deploy(ctx context.Context) (*appsv1.Deployment, error) {
 
 	if w.sandboxed {
 		spec.RuntimeClassName = &GvisorRuntimeClass
+		spec.Hostname = "sandbox"
 	}
 
 	deployment, err = deployments.Create(ctx, &appsv1.Deployment{
